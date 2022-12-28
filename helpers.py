@@ -103,13 +103,26 @@ def get_crops(img, contours):
 
     return crops
 
-def remove_small_crops(img, crops):
+def remove_specks_and_lines(img, contours):
+    total_area = img.shape[0]*img.shape[1]
+
+    hulls = [cv2.convexHull(c) for c in contours]
+    contours = [c for c,h in zip(contours, hulls) if cv2.contourArea(cv2.approxPolyDP(h,0.001,True))>total_area*0.005]
+    
+    if debug:
+        print("DEBUG get_contours")
+        plot_contours(img, contours)
+
+    return contours
+
+
+def remove_small_crops(img, crops, factor=4):
     total_area = img.shape[0]*img.shape[1]
 
     if img.shape[0]/img.shape[1]<1.0:
-        minimal_crop_area = 0.01
+        minimal_crop_area = 0.0025*factor
     else:
-        minimal_crop_area = 0.04
+        minimal_crop_area = 0.01*factor
 
     # for c in crops:
     #     print(c.area/total_area)
@@ -120,6 +133,41 @@ def remove_small_crops(img, crops):
         plot_frames(img, big_crops)
 
     return big_crops
+
+
+def merge_vertical_overlapping_crops(crops):
+    crops_pair = [(a, b) for idx, a in enumerate(crops) for b in crops[idx + 1:]]
+    to_remove = set()
+    while True:
+        crops_pair = [(a, b) for idx, a in enumerate(crops) for b in crops[idx + 1:]]
+        to_merge = []
+        for c1,c2 in crops_pair:
+            if c2.y<=c1.y and c1.y<=c2.z:
+                to_merge.append([c1,c2])
+                continue
+            if c1.y<=c2.y and c2.y<=c1.z:
+                to_merge.append([c1,c2])
+                continue
+        
+        if not to_merge: break
+
+        new_crops = set()
+        to_delete = set()
+        for i,j in to_merge:
+            new_crops.add(i+j)
+            to_delete.add(i)
+            to_delete.add(j)
+
+        for t in to_delete:
+            del crops[crops.index(t)]
+        
+        crops.extend(new_crops)
+        
+    crops = sorted(crops, key=lambda crop: crop.y)
+    # if debug:
+    #     print('merge_overlapping_crops')
+    #     print(crops)
+    return crops
 
 def merge_overlapping_crops(crops, percentage=0.5):
     crops_pair = [(a, b) for idx, a in enumerate(crops) for b in crops[idx + 1:]]
@@ -156,10 +204,83 @@ def merge_overlapping_crops(crops, percentage=0.5):
             del crops[crops.index(t)]
         
         crops.extend(new_crops)
-    if debug:
-        print('merge_overlapping_crops')
-        print(crops)
+    # if debug:
+    #     print('merge_overlapping_crops')
+    #     print(crops)
     return crops
+
+from imutils.object_detection import non_max_suppression
+
+def get_text_crops(img):
+    #Prepare the Image
+    #use multiple of 32 to set the new image shape
+    height,width,colorch=img.shape
+    new_height=(height//32)*32
+    new_width=(width//32)*32
+
+    h_ratio=height/new_height
+    w_ratio=width/new_width
+
+    model=cv2.dnn.readNet('frozen_east_text_detection.pb')
+    #blob from image helps us to prepare the image
+    blob=cv2.dnn.blobFromImage(img,1,(new_width,new_height),(123.68,116.78,103.94),True, False)
+    model.setInput(blob)
+
+    #this model outputs geometry and score maps
+    (geometry,scores)=model.forward(model.getUnconnectedOutLayersNames())
+
+    #once we have done geometry and score maps we have to do post processing to obtain the final text boxes
+    rectangles=[]
+    confidence_score=[]
+    for i in range(geometry.shape[2]):
+        for j in range(0,geometry.shape[3]):
+
+            if scores[0][0][i][j]<0.1:
+                continue
+
+            bottom_x=int(j*4 + geometry[0][1][i][j])
+            bottom_y=int(i*4 + geometry[0][2][i][j])
+
+            top_x=int(j*4 - geometry[0][3][i][j])
+            top_y=int(i*4 - geometry[0][0][i][j])
+
+            if scores[0][0][i][j]>0.9999:
+                rectangles.append((top_x,top_y,bottom_x,bottom_y))
+                confidence_score.append(float(scores[0][0][i][j]))
+
+    #use nms to get required triangles
+    final_boxes = non_max_suppression(np.array(rectangles),probs=confidence_score,overlapThresh=0.1)
+
+
+    def grow(r, perc, max_width, max_height):
+        wgrowth = r.width*perc
+        hgrowth = r.height*perc
+
+        return Rectangle(
+                  r.x,#int(r.x-wgrowth if r.x-wgrowth>0 else 0),
+                  int(r.y-hgrowth if r.y-hgrowth>0 else 0),
+                  r.width,#int(r.width+2*wgrowth if r.x+r.width+2*wgrowth<max_width else max_width-r.x),
+                  int(r.height+2*hgrowth if r.y+r.height+2*hgrowth<max_height else max_height-r.y)
+                 )
+
+    crops = []
+    grown_crops = []
+    for (x1,y1,x2,y2) in final_boxes:
+        x1=int(x1*w_ratio)
+        y1=int(y1*h_ratio)
+        x2=int(x2*w_ratio)
+        y2=int(y2*h_ratio)
+
+        r = Rectangle(x1,y1,x2-x1,y2-y1)
+        crops.append(r)
+        r = grow(r, 0.30, width, height)
+        grown_crops.append(r)
+        grown_crops = merge_overlapping_crops(grown_crops, 0.001)
+
+    if debug:
+        plot_frames(img,grown_crops)
+    
+    return grown_crops
 
 def plot_contours(img, contours):
     z = np.copy(img)
@@ -169,16 +290,18 @@ def plot_contours(img, contours):
     plt.imshow(z, cmap='gray')
     plt.show()
 
-def plot_frames(img, crops, meta=False):
+def plot_frames(img, crops, meta=False, show=True):
     z = np.copy(img)
     for i,c in enumerate(crops):
         cv2.rectangle(z,(c.x,c.y),(c.w,c.z),random.sample(colors, 1)[0],2)
         if meta:
             cv2.putText(z, f'{i}', (c.center_x, c.center_y), cv2.FONT_HERSHEY_SIMPLEX, 5, (255,0,0), 2)
             cv2.circle(z, (c.center_x, c.center_y), 5, (255, 0, 255), 5)
-    plt.figure(figsize=(16,16))
-    plt.imshow(z, cmap='gray')
-    plt.show()
+    if show:
+        plt.figure(figsize=(16,16))
+        plt.imshow(z, cmap='gray')
+        plt.show()
+    return z
 
 def plot_crops(img, crops):
     if crops:

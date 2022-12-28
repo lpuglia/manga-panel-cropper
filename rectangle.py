@@ -48,7 +48,7 @@ class Rectangle():
         if x>w: raise ValueError()
         if y>z: raise ValueError()
         return Rectangle(x, y, w-x, z-y)
-    
+        
     def intersection_area(self, r):
         try:
             return (self-r).area

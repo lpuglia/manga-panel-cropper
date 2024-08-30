@@ -8,6 +8,19 @@ import random
 debug = False
 colors = [[0,255,0], [255,0,0], [0,0,255], [0,255,255], [255,255,0], [255,0,255], [0,255,128], [0,128,255], [0,255,255], [128,255,0], [255,128,0], [128,0,255], [255,0,128]]
 
+def compute_statistics(image, crops):
+    zeros = np.zeros(image.shape[:2])
+    area = np.sum(image.shape[0]*image.shape[1])
+    for c in crops:
+        zeros[max(0,c.y):min(image.shape[0],c.z), max(0,c.x):min(image.shape[1],c.w)]+=1
+    stats = {}
+    stats["area"] = area
+    stats["ignored"] = np.sum(zeros==0)/area
+    stats["panels"] = np.sum(zeros!=0)/area
+    stats["overlapped"] = np.sum(zeros>1)/area
+    return stats
+
+
 def get_contours(img):
     gray = cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
     thresh = None
@@ -169,7 +182,7 @@ def merge_vertical_overlapping_crops(crops):
     #     print(crops)
     return crops
 
-def merge_overlapping_crops(crops, percentage=0.5):
+def merge_overlapping_crops(crops, percentage=0.4):
     crops_pair = [(a, b) for idx, a in enumerate(crops) for b in crops[idx + 1:]]
     to_remove = set()
     for c1,c2 in crops_pair:
